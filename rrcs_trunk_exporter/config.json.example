@@ -1,0 +1,9 @@
+{
+  "riedel": {
+    "url": "http://127.0.0.1:8193/"
+  },
+  "metrics": {
+    "port": 9200,
+    "bind_address": "0.0.0.0"
+  }
+}
