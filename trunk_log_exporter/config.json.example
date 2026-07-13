@@ -1,0 +1,11 @@
+{
+  "trunk_navigator": {
+    "install_dir_glob": "C:\\Program Files\\Riedel\\Trunk Navigator_*",
+    "log_file_glob": "Trunk Navigator*.log",
+    "poll_interval_seconds": 1
+  },
+  "metrics": {
+    "port": 9201,
+    "bind_address": "0.0.0.0"
+  }
+}
