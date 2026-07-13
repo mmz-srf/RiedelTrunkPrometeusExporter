@@ -34,8 +34,10 @@ logger.addHandler(file_handler)
 # --- Prometheus metrics ---------------------------------------------------
 
 MODE_MAP = {'Active': 1, 'Standby': 0, 'Undefined !!': -1}
+MODE_DISPLAY = {'Active': 'Active', 'Standby': 'Standby', 'Undefined !!': 'Undefined'}
 
 MODE = Gauge('trunknavigator_mode', 'Trunk Navigator operating mode (1=Active, 0=Standby, -1=Undefined)')
+MODE_INFO = Info('trunknavigator_mode_state', 'Trunk Navigator operating mode as text (Active/Standby/Undefined)')
 MODE_CHANGES_TOTAL = Counter('trunknavigator_mode_changes_total', 'Number of Trunk Navigator mode changes observed')
 RESTARTS_TOTAL = Counter('trunknavigator_restarts_total', 'Number of Trunk Navigator application starts observed in the log')
 VERSION_INFO = Info('trunknavigator_version', 'Trunk Navigator version reported in the log')
@@ -74,9 +76,19 @@ IGNORED_TIMEOUT_IPS: set[str] = set()
 ip_to_net_addr: dict[str, int] = {}
 net_addr_to_name: dict[int, str] = {}
 ip_current_label: dict[str, str] = {}
+# Last known artist_node_up value per ip, so a rename can carry it forward
+# onto the new label - a stable, already-connected node may never produce
+# another "Connected"/"Could not connect" line to re-set it otherwise.
+ip_up_state: dict[str, float] = {}
+# Optional user-supplied IP -> name overrides from config (trunk_navigator.node_names),
+# for nodes that never have routing traffic to learn a name from automatically.
+# Takes priority over the auto-learned name if both are present.
+STATIC_NODE_NAMES: dict[str, str] = {}
 
 
 def resolve_label(ip: str) -> str:
+    if ip in STATIC_NODE_NAMES:
+        return STATIC_NODE_NAMES[ip]
     net_addr = ip_to_net_addr.get(ip)
     if net_addr is None:
         return ip
@@ -85,12 +97,19 @@ def resolve_label(ip: str) -> str:
 
 def relabel(ip: str) -> None:
     new_label = resolve_label(ip)
-    old_label = ip_current_label.get(ip)
+    # Before the first relabel() call for this ip, resolve_label(ip) would
+    # have returned the raw ip itself (see resolve_label above) - so a metric
+    # series may already exist under that label even though ip_current_label
+    # was never explicitly set. Default to "ip" here, not None, or that stale
+    # series never gets cleaned up on the first rename.
+    old_label = ip_current_label.get(ip, ip)
     ip_current_label[ip] = new_label
-    if old_label is None or old_label == new_label:
+    if old_label == new_label:
         return
 
     logger.info(f"Relabel: Artist node {ip} identified as {new_label!r} (was {old_label!r})")
+    if ip in ip_up_state:
+        NODE_UP.labels(name=new_label).set(ip_up_state[ip])
     try:
         NODE_UP.remove(old_label)
     except KeyError:
@@ -149,26 +168,33 @@ SOURCE_DEST_NAME_RE = re.compile(r'(?P<name>[^:()]+)::[^()]+\(net:(?P<net_addr>\
 
 
 def handle_mode_change(m: re.Match) -> None:
-    MODE.set(MODE_MAP.get(m.group('to'), -1))
+    to_mode = m.group('to')
+    MODE.set(MODE_MAP.get(to_mode, -1))
+    MODE_INFO.info({'mode': MODE_DISPLAY.get(to_mode, to_mode)})
     MODE_CHANGES_TOTAL.inc()
 
 
+def set_node_up(ip: str, value: float) -> None:
+    ip_up_state[ip] = value
+    NODE_UP.labels(name=resolve_label(ip)).set(value)
+
+
 def handle_connected(m: re.Match) -> None:
-    NODE_UP.labels(name=resolve_label(m.group('ip'))).set(1)
+    set_node_up(m.group('ip'), 1)
     if m.group('redundant'):
         CONTROLLER_FAILOVER_TOTAL.inc()
 
 
 def handle_timeout(m: re.Match) -> None:
     ip = m.group('ip')
-    NODE_UP.labels(name=resolve_label(ip)).set(0)
+    set_node_up(ip, 0)
     if ip not in IGNORED_TIMEOUT_IPS:
         NODE_CONNECT_ERRORS_TOTAL.labels(name=resolve_label(ip), reason='timeout').inc()
 
 
 def handle_refused(m: re.Match) -> None:
     ip = m.group('ip')
-    NODE_UP.labels(name=resolve_label(ip)).set(0)
+    set_node_up(ip, 0)
     NODE_CONNECT_ERRORS_TOTAL.labels(name=resolve_label(ip), reason='refused').inc()
 
 
@@ -261,6 +287,20 @@ def find_active_log_file(install_dir_glob: str, log_file_glob: str) -> str | Non
     return max(log_files, key=os.path.getmtime)
 
 
+def read_complete_lines(fh):
+    """Yield only fully-written lines, leaving a trailing partial line (still
+    being written) unconsumed so it can be re-read once it is complete."""
+    while True:
+        position = fh.tell()
+        line = fh.readline()
+        if not line:
+            return
+        if not line.endswith('\n'):
+            fh.seek(position)
+            return
+        yield line
+
+
 def tail_logs(config: dict) -> None:
     install_dir_glob = config['install_dir_glob']
     log_file_glob = config['log_file_glob']
@@ -268,6 +308,14 @@ def tail_logs(config: dict) -> None:
 
     current_path = None
     fh = None
+    # On the very first log file opened, replay it from the start so that
+    # metrics (mode, node up/down, learned names, ...) reflect the state that
+    # already existed before the exporter started, not just events that
+    # happen to occur afterwards. Counters (e.g. connect error totals) will
+    # include this backlog too, causing a one-off jump right after start -
+    # accepted trade-off for correct gauges. Later log rotations don't need
+    # this: in-memory state already reflects reality and just keeps going.
+    backfilled = False
 
     while True:
         active_path = find_active_log_file(install_dir_glob, log_file_glob)
@@ -279,7 +327,16 @@ def tail_logs(config: dict) -> None:
             current_path = active_path
             if current_path:
                 fh = open(current_path, 'r', encoding='utf-8-sig', errors='replace')
-                fh.seek(0, os.SEEK_END)
+                if not backfilled:
+                    logger.info(f"Tail Logs: Reading {current_path} from the start to establish current state...")
+                    for line in read_complete_lines(fh):
+                        try:
+                            process_line(line)
+                        except Exception as e:
+                            logger.warning(f"Tail Logs: Failed to process line {line!r}: {e}")
+                    backfilled = True
+                else:
+                    fh.seek(0, os.SEEK_END)
                 LOG_TAILER_UP.set(1)
                 CURRENT_LOG_FILE.info({'path': current_path})
                 logger.info(f"Tail Logs: Now tailing {current_path}")
@@ -291,22 +348,19 @@ def tail_logs(config: dict) -> None:
 
         if fh:
             try:
-                size = os.path.getsize(current_path)
-                if size < fh.tell():
+                if os.path.getsize(current_path) < fh.tell():
                     # File was truncated or replaced in place.
                     fh.seek(0)
 
-                position = fh.tell()
-                line = fh.readline()
-                if line and line.endswith('\n'):
+                got_line = False
+                for line in read_complete_lines(fh):
+                    got_line = True
                     try:
                         process_line(line)
                     except Exception as e:
                         logger.warning(f"Tail Logs: Failed to process line {line!r}: {e}")
+                if got_line:
                     continue
-                else:
-                    # Partial line (still being written) or EOF: rewind and wait.
-                    fh.seek(position)
             except OSError as e:
                 logger.warning(f"Tail Logs: Lost access to {current_path}: {e}")
                 fh.close()
@@ -333,6 +387,7 @@ def main() -> None:
     config = load_config()
 
     IGNORED_TIMEOUT_IPS.update(config['trunk_navigator'].get('ignore_timeout_ips', []))
+    STATIC_NODE_NAMES.update(config['trunk_navigator'].get('node_names', {}))
 
     start_http_server(config['metrics']['port'], addr=config['metrics'].get('bind_address', '0.0.0.0'))
     logger.info(f"Main: Metrics server started on port {config['metrics']['port']}")

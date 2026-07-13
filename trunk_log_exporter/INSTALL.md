@@ -48,7 +48,11 @@ notepad config.json
     "install_dir_glob": "C:\\Program Files\\Riedel\\Trunk Navigator_*",
     "log_file_glob": "Trunk Navigator*.log",
     "poll_interval_seconds": 1,
-    "ignore_timeout_ips": []
+    "ignore_timeout_ips": [],
+    "node_names": {
+      "10.94.130.46": "Standort XY",
+      "10.94.130.47": "Standort XY"
+    }
   },
   "metrics": {
     "port": 9201,
@@ -61,6 +65,7 @@ notepad config.json
 - `trunk_navigator.log_file_glob`: Suchmuster für die Logdateien innerhalb des Installationsverzeichnisses. Bei Rotation wird automatisch die zuletzt geänderte (aktive) Datei weiterverfolgt. Falls die tatsächliche Namenskonvention auf dem Zielsystem abweicht, hier anpassen.
 - `trunk_navigator.poll_interval_seconds`: Wartezeit zwischen den Prüfungen auf neue Logzeilen bzw. eine neue/rotierte Logdatei.
 - `trunk_navigator.ignore_timeout_ips`: Liste von Artist-Node-IPs, die absichtlich nicht durchgehend online sind (z.B. mobile/temporäre Einheiten). Für diese IPs wird `artist_node_connect_errors_total{reason="timeout"}` nicht erhöht - `artist_node_up` zeigt weiterhin normal 0/1. Falls die Node über Primär- und Redundanz-IP verfügt und beide ignoriert werden sollen, beide eintragen.
+- `trunk_navigator.node_names`: Feste IP-zu-Standortname-Zuordnung, als Ergänzung zur automatischen Namenserkennung (siehe unten). Nützlich für Nodes, über die nie Call/Listen-Traffic geroutet wird und die deshalb sonst dauerhaft als `net-<N>` oder IP angezeigt würden. Primär- und Redundanz-IP eines Standorts auf denselben Namen mappen, damit beide zu einer Zeitreihe zusammengeführt werden. Ein hier eingetragener Name hat immer Vorrang vor einem automatisch gelernten.
 - `metrics.port`: Port, auf dem `/metrics` für Prometheus bereitgestellt wird.
 - `metrics.bind_address`: `0.0.0.0` falls Prometheus von einer anderen Maschine scraped, `127.0.0.1` falls nur lokal.
 
@@ -79,7 +84,7 @@ curl.exe http://localhost:9201/metrics
 
 Erwartete Ausgabe enthält u.a. `trunknavigator_mode`, `trunknavigator_log_tailer_up`, `artist_node_up`, `trunknavigator_version_info`. Mit `Strg+C` beenden, sobald das funktioniert.
 
-**Hinweis zu `artist_node_up{name=...}`:** Der Exporter kennt keine feste IP-zu-Standort-Zuordnung, sondern lernt den Standortnamen automatisch aus dem Routing-Verkehr im Log (z.B. `Zürich`, `Genève 20`, `SRF OB 5`). Solange für eine Artist-Node-IP noch kein Name gelernt wurde, erscheint sie vorübergehend als `net-<NetAddr>` oder, falls noch nicht einmal die NetAddr bekannt ist, als rohe IP-Adresse. Sobald ein Name gelernt wird, wird die alte Zeitreihe entfernt und durch die neu benannte ersetzt. Standby-Controller, über die im Beobachtungszeitraum nie Traffic geroutet wurde, bleiben dauerhaft IP-benannt - das ist zu erwarten und kein Fehler.
+**Hinweis zu `artist_node_up{name=...}`:** Der Exporter lernt den Standortnamen primär automatisch aus dem Routing-Verkehr im Log (z.B. `Zürich`, `Genève 20`, `SRF OB 5`). Solange für eine Artist-Node-IP noch kein Name gelernt wurde, erscheint sie als `net-<NetAddr>` oder, falls noch nicht einmal die NetAddr bekannt ist, als rohe IP-Adresse - das betrifft insbesondere Nodes, über die während der Laufzeit nie tatsächlich ein Call geroutet wird (z.B. reine Redundanz-Controller). Für solche Fälle in `trunk_navigator.node_names` einen festen Namen eintragen (siehe Schritt 4) - der Wert von `artist_node_up` ist auch ohne Namen bereits korrekt, es fehlt nur die Lesbarkeit.
 
 ## 6. Windows Firewall (nur falls Prometheus remote scraped)
 

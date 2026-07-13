@@ -3,7 +3,8 @@
     "install_dir_glob": "C:\\Program Files\\Riedel\\Trunk Navigator_*",
     "log_file_glob": "Trunk Navigator*.log",
     "poll_interval_seconds": 1,
-    "ignore_timeout_ips": []
+    "ignore_timeout_ips": [],
+    "node_names": {}
   },
   "metrics": {
     "port": 9201,
