@@ -48,8 +48,8 @@ ERRORS_TOTAL = Counter('trunknavigator_errors_total', 'Log lines containing an u
 
 NODE_UP = Gauge(
     'artist_node_up',
-    'Connection status to an Artist node (1=connected, 0=not connected), keyed by the site name learned '
-    'from routing traffic (falls back to "net-<NetAddr>" or the raw IP until a name has been learned)',
+    'Connection status to an Artist node (1=connected, 0=not connected), keyed by the site name from '
+    'trunk_navigator.node_names in config.json (falls back to the raw IP if not configured)',
     ['name']
 )
 NODE_CONNECT_ERRORS_TOTAL = Counter('artist_node_connect_errors_total', 'Connection errors to an Artist node', ['name', 'reason'])
@@ -64,81 +64,35 @@ IGNORED_TIMEOUT_IPS: set[str] = set()
 
 # --- Artist node name resolution -------------------------------------------
 #
-# The log never states a human-readable name for the IP a Trunk Navigator
-# connects to. It can only be derived indirectly:
-#   1. Heartbeat lines ("... NetAddr=<N>, IP=<ip> ...") link an IP to its NetAddr.
-#   2. Routing lines ("Source: <name>::<device> (net:<N>, port:<P>)") link a
-#      NetAddr to the site name used in call routing.
-# A name therefore only becomes known once both pieces have been observed at
-# least once; until then, metrics for that node are labelled with "net-<N>"
-# or, if not even the NetAddr is known yet, the raw IP.
+# Names come only from trunk_navigator.node_names in config.json (IP -> name).
+# A Trunk Navigator's redundant controller is always the configured IP's last
+# octet + 1 (e.g. primary 10.94.130.46 / redundant 10.94.130.47); that
+# redundant IP automatically resolves to the same name without a separate
+# config entry.
 
-ip_to_net_addr: dict[str, int] = {}
-net_addr_to_name: dict[int, str] = {}
-ip_current_label: dict[str, str] = {}
-# Last known artist_node_up value per ip, so a rename can carry it forward
-# onto the new label - a stable, already-connected node may never produce
-# another "Connected"/"Could not connect" line to re-set it otherwise.
-ip_up_state: dict[str, float] = {}
-# Optional user-supplied IP -> name overrides from config (trunk_navigator.node_names),
-# for nodes that never have routing traffic to learn a name from automatically.
-# Takes priority over the auto-learned name if both are present.
 STATIC_NODE_NAMES: dict[str, str] = {}
+
+
+def redundant_controller_predecessor(ip: str) -> str | None:
+    prefix, _, last_octet = ip.rpartition('.')
+    if not prefix:
+        return None
+    try:
+        octet = int(last_octet)
+    except ValueError:
+        return None
+    if octet <= 0:
+        return None
+    return f'{prefix}.{octet - 1}'
 
 
 def resolve_label(ip: str) -> str:
     if ip in STATIC_NODE_NAMES:
         return STATIC_NODE_NAMES[ip]
-    net_addr = ip_to_net_addr.get(ip)
-    if net_addr is None:
-        return ip
-    return net_addr_to_name.get(net_addr, f'net-{net_addr}')
-
-
-def relabel(ip: str) -> None:
-    new_label = resolve_label(ip)
-    # Before the first relabel() call for this ip, resolve_label(ip) would
-    # have returned the raw ip itself (see resolve_label above) - so a metric
-    # series may already exist under that label even though ip_current_label
-    # was never explicitly set. Default to "ip" here, not None, or that stale
-    # series never gets cleaned up on the first rename.
-    old_label = ip_current_label.get(ip, ip)
-    ip_current_label[ip] = new_label
-    if old_label == new_label:
-        return
-
-    logger.info(f"Relabel: Artist node {ip} identified as {new_label!r} (was {old_label!r})")
-    if ip in ip_up_state:
-        NODE_UP.labels(name=new_label).set(ip_up_state[ip])
-    try:
-        NODE_UP.remove(old_label)
-    except KeyError:
-        pass
-    try:
-        LINK_RESETS_TOTAL.remove(old_label)
-    except KeyError:
-        pass
-    for reason in ('timeout', 'refused'):
-        try:
-            NODE_CONNECT_ERRORS_TOTAL.remove(old_label, reason)
-        except KeyError:
-            pass
-
-
-def learn_net_addr(ip: str, net_addr: int) -> None:
-    if ip_to_net_addr.get(ip) == net_addr:
-        return
-    ip_to_net_addr[ip] = net_addr
-    relabel(ip)
-
-
-def learn_net_name(net_addr: int, name: str) -> None:
-    if net_addr_to_name.get(net_addr) == name:
-        return
-    net_addr_to_name[net_addr] = name
-    for ip, ip_net_addr in ip_to_net_addr.items():
-        if ip_net_addr == net_addr:
-            relabel(ip)
+    predecessor = redundant_controller_predecessor(ip)
+    if predecessor is not None and predecessor in STATIC_NODE_NAMES:
+        return STATIC_NODE_NAMES[predecessor]
+    return ip
 
 # --- Log line parsing ------------------------------------------------------
 
@@ -158,13 +112,7 @@ LINK_RESET_RE = re.compile(rf'^The Artist node \(IP address = (?P<ip>{IP})\) is 
 RETRY_DELAY_RE = re.compile(r'^Connection retry delay extended to (?P<ms>\d+) millisecond')
 RESTART_RE = re.compile(r'^Application is starting\.\.\.')
 VERSION_RE = re.compile(r'^Trunk Navigator (?P<version>\d+\.\d+\.\S+)$')
-NET_INFO_RE = re.compile(rf'^(?:Received network info from|Send network info from TN-ID=\S+ to) NetAddr=(?P<net_addr>\d+), IP=(?P<ip>{IP})')
 GENERIC_ERROR_RE = re.compile(r'\bError\b|\bException\b')
-
-# Matches "<name>::<device> (net:<N>, port:<P>)", as used for both the
-# "Source:" and "Dest:" of "Call to port" / "Listen to port" / "Monitoring
-# port" lines, to learn the site name for a NetAddr.
-SOURCE_DEST_NAME_RE = re.compile(r'(?P<name>[^:()]+)::[^()]+\(net:(?P<net_addr>\d+), port:\d+\)')
 
 
 def handle_mode_change(m: re.Match) -> None:
@@ -174,36 +122,27 @@ def handle_mode_change(m: re.Match) -> None:
     MODE_CHANGES_TOTAL.inc()
 
 
-def set_node_up(ip: str, value: float) -> None:
-    ip_up_state[ip] = value
-    NODE_UP.labels(name=resolve_label(ip)).set(value)
-
-
 def handle_connected(m: re.Match) -> None:
-    set_node_up(m.group('ip'), 1)
+    NODE_UP.labels(name=resolve_label(m.group('ip'))).set(1)
     if m.group('redundant'):
         CONTROLLER_FAILOVER_TOTAL.inc()
 
 
 def handle_timeout(m: re.Match) -> None:
     ip = m.group('ip')
-    set_node_up(ip, 0)
+    NODE_UP.labels(name=resolve_label(ip)).set(0)
     if ip not in IGNORED_TIMEOUT_IPS:
         NODE_CONNECT_ERRORS_TOTAL.labels(name=resolve_label(ip), reason='timeout').inc()
 
 
 def handle_refused(m: re.Match) -> None:
     ip = m.group('ip')
-    set_node_up(ip, 0)
+    NODE_UP.labels(name=resolve_label(ip)).set(0)
     NODE_CONNECT_ERRORS_TOTAL.labels(name=resolve_label(ip), reason='refused').inc()
 
 
 def handle_link_reset(m: re.Match) -> None:
     LINK_RESETS_TOTAL.labels(name=resolve_label(m.group('ip'))).inc()
-
-
-def handle_net_info(m: re.Match) -> None:
-    learn_net_addr(m.group('ip'), int(m.group('net_addr')))
 
 
 def handle_retry_delay(m: re.Match) -> None:
@@ -227,14 +166,10 @@ PARSERS = [
     (RETRY_DELAY_RE, handle_retry_delay),
     (RESTART_RE, handle_restart),
     (VERSION_RE, handle_version),
-    (NET_INFO_RE, handle_net_info),
 ]
 
 
 def process_message(message: str) -> None:
-    for name_match in SOURCE_DEST_NAME_RE.finditer(message):
-        learn_net_name(int(name_match.group('net_addr')), name_match.group('name').strip())
-
     for regex, handler in PARSERS:
         match = regex.match(message)
         if match:
@@ -309,12 +244,12 @@ def tail_logs(config: dict) -> None:
     current_path = None
     fh = None
     # On the very first log file opened, replay it from the start so that
-    # metrics (mode, node up/down, learned names, ...) reflect the state that
-    # already existed before the exporter started, not just events that
-    # happen to occur afterwards. Counters (e.g. connect error totals) will
-    # include this backlog too, causing a one-off jump right after start -
-    # accepted trade-off for correct gauges. Later log rotations don't need
-    # this: in-memory state already reflects reality and just keeps going.
+    # metrics (mode, node up/down, ...) reflect the state that already
+    # existed before the exporter started, not just events that happen to
+    # occur afterwards. Counters (e.g. connect error totals) will include
+    # this backlog too, causing a one-off jump right after start - accepted
+    # trade-off for correct gauges. Later log rotations don't need this:
+    # in-memory state already reflects reality and just keeps going.
     backfilled = False
 
     while True:
