@@ -34,10 +34,10 @@ Basierend auf der Analyse der Beispiellogs (siehe Verzeichnis Logfiles) kommen f
 - **`trunknavigator_mode`** (Gauge, 0=Standby, 1=Active, -1=Undefined) - aus `Change Trunk Navigator Mode from "X" to "Y"`
 - **`trunknavigator_mode_changes_total`** (Counter) - Anzahl Moduswechsel, zur Flapping-Erkennung
 - **`artist_node_up{name=...}`** (Gauge) - Verbindungsstatus je Artist-Node, aus `Connected successfully` / `Could not connect ... timed out` / `Error connecting the socket ... refused`. Der Standortname wird automatisch aus dem Routing-Verkehr gelernt (IP -> NetAddr aus den Heartbeat-Zeilen, NetAddr -> Name aus `Source:`/`Dest:` der Call/Listen/Monitoring-Zeilen); bis ein Name gelernt ist, wird `net-<NetAddr>` bzw. ersatzweise die rohe IP verwendet.
-- **`artist_node_connect_errors_total{name=...}`** (Counter) - Timeouts/Verbindungsfehler je Artist-Node (gleiche Namensauflösung wie oben)
+- **`artist_node_connect_errors_total{name=...}`** (Counter) - Timeouts/Verbindungsfehler je Artist-Node (gleiche Namensauflösung wie oben). Über `trunk_navigator.ignore_timeout_ips` in `config.json` können IPs von absichtlich intermittenten Nodes von der Timeout-Zählung ausgenommen werden (`artist_node_up` bleibt für diese Nodes unverändert normal aussagekräftig).
 - **`artist_controller_failover_total`** (Counter) - Umschaltung auf "2nd, redundant controller"
 - **`trunknavigator_restarts_total`** (Counter) - aus `Application is starting...` / `Trunk Navigator started`
-- **`trunknavigator_version_info`** (Info-Metrik) - aus Versionsstring, z.B. `Trunk Navigator 8.8.TN2-13.0d233bf`
+- **`trunknavigator_version_info`** (Info-Metrik) - aus Versionsstring, z.B. `Trunk Navigator 8.8.TN2-13.0d233bf`1
 - **`trunknavigator_log_last_event_timestamp`** (Gauge) - Zeitstempel der letzten verarbeiteten Logzeile, zur Staleness-Erkennung falls Service/Log hängt
 
 ### Priorität mittel (Verbindungs-Detail)

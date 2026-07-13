@@ -47,7 +47,8 @@ notepad config.json
   "trunk_navigator": {
     "install_dir_glob": "C:\\Program Files\\Riedel\\Trunk Navigator_*",
     "log_file_glob": "Trunk Navigator*.log",
-    "poll_interval_seconds": 1
+    "poll_interval_seconds": 1,
+    "ignore_timeout_ips": []
   },
   "metrics": {
     "port": 9201,
@@ -59,6 +60,7 @@ notepad config.json
 - `trunk_navigator.install_dir_glob`: Suchmuster für das Installationsverzeichnis. Ändert sich der Pfad nach einem Software-Update (z.B. `Trunk Navigator_8.9`), wird automatisch das zuletzt geänderte passende Verzeichnis verwendet - keine Anpassung nötig.
 - `trunk_navigator.log_file_glob`: Suchmuster für die Logdateien innerhalb des Installationsverzeichnisses. Bei Rotation wird automatisch die zuletzt geänderte (aktive) Datei weiterverfolgt. Falls die tatsächliche Namenskonvention auf dem Zielsystem abweicht, hier anpassen.
 - `trunk_navigator.poll_interval_seconds`: Wartezeit zwischen den Prüfungen auf neue Logzeilen bzw. eine neue/rotierte Logdatei.
+- `trunk_navigator.ignore_timeout_ips`: Liste von Artist-Node-IPs, die absichtlich nicht durchgehend online sind (z.B. mobile/temporäre Einheiten). Für diese IPs wird `artist_node_connect_errors_total{reason="timeout"}` nicht erhöht - `artist_node_up` zeigt weiterhin normal 0/1. Falls die Node über Primär- und Redundanz-IP verfügt und beide ignoriert werden sollen, beide eintragen.
 - `metrics.port`: Port, auf dem `/metrics` für Prometheus bereitgestellt wird.
 - `metrics.bind_address`: `0.0.0.0` falls Prometheus von einer anderen Maschine scraped, `127.0.0.1` falls nur lokal.
 

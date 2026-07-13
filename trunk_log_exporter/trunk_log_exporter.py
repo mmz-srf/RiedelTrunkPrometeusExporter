@@ -55,6 +55,11 @@ CONTROLLER_FAILOVER_TOTAL = Counter('artist_controller_failover_total', 'Failove
 LINK_RESETS_TOTAL = Counter('artist_link_resets_total', 'Link check failures leading to a connection reset', ['name'])
 CONNECTION_RETRY_DELAY_MS = Gauge('artist_connection_retry_delay_ms', 'Current connection retry delay in milliseconds')
 
+# IPs of Artist nodes that are known to be intermittently offline by design;
+# their connection timeouts are expected and not counted as errors. Populated
+# from config in main(). artist_node_up is still reported normally for them.
+IGNORED_TIMEOUT_IPS: set[str] = set()
+
 # --- Artist node name resolution -------------------------------------------
 #
 # The log never states a human-readable name for the IP a Trunk Navigator
@@ -157,7 +162,8 @@ def handle_connected(m: re.Match) -> None:
 def handle_timeout(m: re.Match) -> None:
     ip = m.group('ip')
     NODE_UP.labels(name=resolve_label(ip)).set(0)
-    NODE_CONNECT_ERRORS_TOTAL.labels(name=resolve_label(ip), reason='timeout').inc()
+    if ip not in IGNORED_TIMEOUT_IPS:
+        NODE_CONNECT_ERRORS_TOTAL.labels(name=resolve_label(ip), reason='timeout').inc()
 
 
 def handle_refused(m: re.Match) -> None:
@@ -325,6 +331,8 @@ def load_config(file_path: str = "config.json") -> dict:
 
 def main() -> None:
     config = load_config()
+
+    IGNORED_TIMEOUT_IPS.update(config['trunk_navigator'].get('ignore_timeout_ips', []))
 
     start_http_server(config['metrics']['port'], addr=config['metrics'].get('bind_address', '0.0.0.0'))
     logger.info(f"Main: Metrics server started on port {config['metrics']['port']}")
