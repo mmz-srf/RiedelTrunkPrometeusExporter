@@ -7,7 +7,7 @@
     "node_names": {}
   },
   "metrics": {
-    "port": 9201,
+    "port": 9200,
     "bind_address": "0.0.0.0"
   }
 }
